@@ -1,32 +1,41 @@
 let data, usa;
-let selectedDrug = "Alcohol";
-let selectedAgeGroup = "12-17";
-let selectedYear = "2002";
+const selectedData = { drug: "Alcohol", ageGroup: "12-17", year: "2002" };
 let clickedState = null;
+let hoveredState = null;
 let minRate, maxRate;
-let stateShapes = {};
-let dataCache = {};
+const stateShapes = new Map();
+const dataCache = new Map();
 let mapBuffer;
+let hoverProgress = 0;
 
 function preload() {
-  data = loadTable('drugs.csv', 'csv', 'header');
-  usa = loadJSON('https://raw.githubusercontent.com/PublicaMundi/MappingAPI/master/data/geojson/us-states.json');
+  data = loadTable('drugs.csv', 'csv', 'header', 
+    () => console.log('Data loaded successfully'),
+    (error) => console.error('Error loading data:', error)
+  );
+  usa = loadJSON('https://raw.githubusercontent.com/PublicaMundi/MappingAPI/master/data/geojson/us-states.json',
+    () => console.log('USA map data loaded successfully'),
+    (error) => console.error('Error loading USA map data:', error)
+  );
 }
 
 function setup() {
   pixelDensity(1);
-  let canvas = createCanvas(1000, 600);
+  const canvas = createCanvas(1000, 600);
   canvas.parent('canvas-container');
   mapBuffer = createGraphics(width, height);
   
   createUI();
   createStateShapes();
   calculateRateRange();
+  updateMapColors();
 }
 
 function draw() {
   background(240);
-  drawMap();
+  image(mapBuffer, 0, 0);
+  if (hoveredState) highlightState(hoveredState, color(100, 100, 255, 100));
+  if (clickedState) highlightState(clickedState, color(100, 100, 255, 200));
   drawLegend();
   
   if (clickedState) {
@@ -35,122 +44,116 @@ function draw() {
 }
 
 function createStateShapes() {
-  for (let feature of usa.features) {
-    let state = feature.properties.name;
-    stateShapes[state] = [];
-    for (let coord of feature.geometry.coordinates[0]) {
-      let pos = latLongToXY(coord[1], coord[0]);
-      stateShapes[state].push(pos);
+  usa.features.forEach(feature => {
+    const state = feature.properties.name;
+    const shapes = [];
+    if (feature.geometry.type === "Polygon") {
+      shapes.push(processCoordinates(feature.geometry.coordinates[0]));
+    } else if (feature.geometry.type === "MultiPolygon") {
+      feature.geometry.coordinates.forEach(polygon => {
+        shapes.push(processCoordinates(polygon[0]));
+      });
     }
-  }
+    stateShapes.set(state, shapes);
+  });
+}
+
+function processCoordinates(coordinates) {
+  return coordinates.map(coord => latLongToXY(coord[1], coord[0]));
+}
+
+function latLongToXY(lat, long) {
+  const x = map(long, -125, -66, width * 0.05, width * 0.95);
+  const y = map(lat, 49, 25, height * 0.05, height * 0.95);
+  return {x, y};
 }
 
 function createUI() {
-  let formContainer = select('#form-container');
+  const formContainer = select('#form-container');
   
-  let drugs = ["Alcohol", "Tobacco", "Cocaine", "Marijuana"];
-  let ageGroups = ["12-17", "18-25", "26+"];
-  let years = [...new Set(data.getColumn('Year'))].sort();
+  const drugs = ["Alcohol", "Tobacco", "Cocaine", "Marijuana"];
+  const ageGroups = ["12-17", "18-25", "26+"];
+  const years = [...new Set(data.getColumn('Year'))].sort();
 
-  createStyledSelect("Select Drug:", drugs, formContainer, (value) => {
-    selectedDrug = value;
-    calculateRateRange();
-    redraw();
-  });
-  
-  createStyledSelect("Select Age Group:", ageGroups, formContainer, (value) => {
-    selectedAgeGroup = value;
-    calculateRateRange();
-    redraw();
-  });
-  
-  createStyledSelect("Select Year:", years, formContainer, (value) => {
-    selectedYear = value;
-    calculateRateRange();
-    redraw();
-  });
+  createStyledSelect("Select Drug:", drugs, formContainer, value => updateSelection('drug', value));
+  createStyledSelect("Select Age Group:", ageGroups, formContainer, value => updateSelection('ageGroup', value));
+  createStyledSelect("Select Year:", years, formContainer, value => updateSelection('year', value));
 }
 
 function createStyledSelect(label, options, parent, callback) {
-  let formGroup = createDiv();
-  formGroup.parent(parent);
-  formGroup.class('form-group');
-
-  let labelElement = createElement('label', label);
-  labelElement.parent(formGroup);
-
-  let selectBox = createSelect();
-  selectBox.parent(formGroup);
-
+  const formGroup = createDiv().parent(parent).class('form-group');
+  createElement('label', label).parent(formGroup);
+  const selectBox = createSelect().parent(formGroup);
   options.forEach(option => selectBox.option(option));
   selectBox.changed(() => callback(selectBox.value()));
 }
 
+function updateSelection(type, value) {
+  selectedData[type] = value;
+  calculateRateRange();
+  updateMapColors();
+}
+
 function calculateRateRange() {
-  let rates = data.rows.filter(row => row.getString('Year') === selectedYear)
-    .map(row => getConsumptionData(row.getString('State')))
-    .filter(rate => rate !== null);
-  minRate = min(rates);
-  maxRate = max(rates);
+  const rates = [];
+  stateShapes.forEach((_, state) => {
+    const rate = getConsumptionData(state);
+    if (rate !== null) rates.push(rate);
+  });
+  minRate = Math.min(...rates);
+  maxRate = Math.max(...rates);
 }
 
-function drawMap() {
+function updateMapColors() {
   mapBuffer.clear();
-  mapBuffer.push();
-  for (let state in stateShapes) {
-    let consumption = getConsumptionData(state);
-    let colorValue = getColorFromConsumption(consumption);
+  mapBuffer.noStroke();
+  stateShapes.forEach((shapes, state) => {
+    const consumption = getConsumptionData(state);
+    const colorValue = getColorFromConsumption(consumption);
     mapBuffer.fill(colorValue);
-    mapBuffer.stroke(0);
-    mapBuffer.strokeWeight(1);
-    mapBuffer.beginShape();
-    for (let pos of stateShapes[state]) {
-      mapBuffer.vertex(pos.x, pos.y);
-    }
-    mapBuffer.endShape(CLOSE);
-  }
-  mapBuffer.pop();
-  image(mapBuffer, 0, 0);
-}
-
-function latLongToXY(lat, long) {
-  let x = map(long, -125, -66, width * 0.05, width * 0.95);
-  let y = map(lat, 49, 25, height * 0.05, height * 0.95);
-  return createVector(x, y);
+    shapes.forEach(shape => {
+      mapBuffer.beginShape();
+      shape.forEach(pos => mapBuffer.vertex(pos.x, pos.y));
+      mapBuffer.endShape(CLOSE);
+    });
+  });
+  mapBuffer.stroke(0);
+  mapBuffer.strokeWeight(1);
+  mapBuffer.noFill();
+  stateShapes.forEach(shapes => {
+    shapes.forEach(shape => {
+      mapBuffer.beginShape();
+      shape.forEach(pos => mapBuffer.vertex(pos.x, pos.y));
+      mapBuffer.endShape(CLOSE);
+    });
+  });
 }
 
 function getConsumptionData(state) {
-  let key = `${state}_${selectedYear}_${selectedDrug}_${selectedAgeGroup}`;
-  if (dataCache[key] === undefined) {
-    let row = data.rows.find(r => r.getString('State') === state && r.getString('Year') === selectedYear);
+  const key = `${state}_${selectedData.year}_${selectedData.drug}_${selectedData.ageGroup}`;
+  if (!dataCache.has(key)) {
+    const row = data.rows.find(r => r.getString('State') === state && r.getString('Year') === selectedData.year);
     if (row) {
       let column;
-      if (selectedDrug === "Cocaine") {
-        column = `Rates.Illicit Drugs.Cocaine Used Past Year.${selectedAgeGroup}`;
-      } else if (selectedDrug === "Marijuana") {
-        column = `Rates.Marijuana.Used Past Month.${selectedAgeGroup}`;
+      if (selectedData.drug === "Cocaine") {
+        column = `Rates.Illicit Drugs.Cocaine Used Past Year.${selectedData.ageGroup}`;
+      } else if (selectedData.drug === "Marijuana") {
+        column = `Rates.Marijuana.Used Past Month.${selectedData.ageGroup}`;
       } else {
-        column = `Rates.${selectedDrug}.Use Past Month.${selectedAgeGroup}`;
+        column = `Rates.${selectedData.drug}.Use Past Month.${selectedData.ageGroup}`;
       }
-      dataCache[key] = row.getNum(column);
+      dataCache.set(key, row.getNum(column) || null);
     } else {
-      dataCache[key] = null;
+      dataCache.set(key, null);
     }
   }
-  return dataCache[key];
+  return dataCache.get(key);
 }
 
 function getColorFromConsumption(consumption) {
   if (consumption === null) return color(200);
-  let normalizedRate = map(consumption, minRate, maxRate, 0, 1);
-  
-  if (normalizedRate > 0.66) {
-    return color(255, 0, 0);
-  } else if (normalizedRate > 0.33) {
-    return color(255, 165, 0);
-  } else {
-    return color(255, 255, 0);
-  }
+  const normalizedRate = map(consumption, minRate, maxRate, 0, 1);
+  return lerpColor(color(255, 255, 0), color(255, 0, 0), normalizedRate);
 }
 
 function drawLegend() {
@@ -159,68 +162,106 @@ function drawLegend() {
   const legendWidth = 20;
   const legendHeight = 100;
 
-  const colors = [color(255, 0, 0), color(255, 165, 0), color(255, 255, 0), color(200)];
-  const labels = ['High', 'Medium', 'Low', 'No data'];
-
-  for (let i = 0; i < colors.length; i++) {
-    fill(colors[i]);
-    rect(legendX, legendY + i * 25, legendWidth, 20);
-    fill(0);
-    textAlign(LEFT, CENTER);
-    textSize(12);
-    text(labels[i], legendX + 30, legendY + i * 25 + 10);
+  noStroke();
+  for (let i = 0; i < legendHeight; i++) {
+    const t = i / legendHeight;
+    fill(lerpColor(color(255, 255, 0), color(255, 0, 0), t));
+    rect(legendX, legendY + i, legendWidth, 1);
   }
+  
+  fill(200);
+  rect(legendX, legendY + legendHeight + 5, legendWidth, 20);
+
+  fill(0);
+  textAlign(LEFT, CENTER);
+  textSize(12);
+  text('High', legendX + 30, legendY);
+  text('Low', legendX + 30, legendY + legendHeight);
+  text('No data', legendX + 30, legendY + legendHeight + 15);
 
   textSize(14);
   textAlign(CENTER);
   text('Consumption', legendX + legendWidth / 2, legendY - 20);
 }
 
-function mousePressed() {
-  clickedState = null;
-  for (let state in stateShapes) {
-    if (isPointInPolygon(mouseX, mouseY, stateShapes[state])) {
-      clickedState = state;
-      break;
-    }
+function mouseMoved() {
+  const newHoveredState = getStateAtPoint(mouseX, mouseY);
+  
+  // Si l'état survolé change, on réinitialise l'animation
+  if (newHoveredState !== hoveredState) {
+    hoveredState = newHoveredState;
+    hoverProgress = 0; // Commence la transition
+  } else if (hoveredState) {
+    hoverProgress = min(hoverProgress + 0.05, 1); // Transition douce
   }
   redraw();
+}
+
+function mousePressed() {
+  clickedState = getStateAtPoint(mouseX, mouseY);
+  redraw();
+}
+function mouseOut() {
+  hoverProgress = max(hoverProgress - 0.05, 0); // Réduire la progression
+  redraw();
+}
+function getStateAtPoint(x, y) {
+  for (const [state, shapes] of stateShapes) {
+    if (shapes.some(shape => isPointInPolygon(x, y, shape))) {
+      return state;
+    }
+  }
+  return null;
 }
 
 function isPointInPolygon(x, y, polygon) {
   let inside = false;
   for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-    let xi = polygon[i].x, yi = polygon[i].y;
-    let xj = polygon[j].x, yj = polygon[j].y;
-    let intersect = ((yi > y) != (yj > y))
-        && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+    const xi = polygon[i].x, yi = polygon[i].y;
+    const xj = polygon[j].x, yj = polygon[j].y;
+    const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
     if (intersect) inside = !inside;
   }
   return inside;
 }
 
+function highlightState(state, highlightColor) {
+  const shapes = stateShapes.get(state);
+  if (shapes) {
+    noStroke();
+    fill(lerpColor(highlightColor, color(0, 0, 255, 150), hoverProgress)); // Transition de couleur douce
+    shapes.forEach(shape => {
+      beginShape();
+      shape.forEach(pos => {
+        const scaleFactor = lerp(1, 1.1, hoverProgress); // Effet de zoom
+        vertex(pos.x * scaleFactor, pos.y * scaleFactor);
+      });
+      endShape(CLOSE);
+    });
+  }
+}
+
 function displayStateInfo(state) {
-  let consumption = getConsumptionData(state);
-  let row = data.rows.find(r => r.getString('State') === state && r.getString('Year') === selectedYear);
+  const consumption = getConsumptionData(state);
+  const row = data.rows.find(r => r.getString('State') === state && r.getString('Year') === selectedData.year);
+  
+  fill(0);
+  textSize(14);
+  textAlign(CENTER);
+  
   if (consumption !== null && row) {
-    let population = row.getNum(`Population.${selectedAgeGroup}`);
+    const population = row.getNum(`Population.${selectedData.ageGroup}`);
     let total;
-    if (selectedDrug === "Cocaine") {
-      total = row.getNum(`Totals.Illicit Drugs.Cocaine Used Past Year.${selectedAgeGroup}`);
-    } else if (selectedDrug === "Marijuana") {
-      total = row.getNum(`Totals.Marijuana.Used Past Month.${selectedAgeGroup}`);
+    if (selectedData.drug === "Cocaine") {
+      total = row.getNum(`Totals.Illicit Drugs.Cocaine Used Past Year.${selectedData.ageGroup}`);
+    } else if (selectedData.drug === "Marijuana") {
+      total = row.getNum(`Totals.Marijuana.Used Past Month.${selectedData.ageGroup}`);
     } else {
-      total = row.getNum(`Totals.${selectedDrug}.Use Past Month.${selectedAgeGroup}`);
+      total = row.getNum(`Totals.${selectedData.drug}.Use Past Month.${selectedData.ageGroup}`);
     }
-    fill(0);
-    textSize(14);
-    textAlign(CENTER);
-    text(`${state}: ${selectedDrug} use (${selectedAgeGroup}) in ${selectedYear}`, width / 2, height - 40);
+    text(`${state}: ${selectedData.drug} use (${selectedData.ageGroup}) in ${selectedData.year}`, width / 2, height - 40);
     text(`Rate: ${consumption.toFixed(2)}%, Total: ${total}, Population: ${population}`, width / 2, height - 20);
   } else {
-    fill(0);
-    textSize(14);
-    textAlign(CENTER);
     text("No data available for this selection", width / 2, height - 30);
   }
 }
